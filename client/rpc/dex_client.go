@@ -84,7 +84,7 @@ type DexClient interface {
 	Claim(chainId sdk.IbcChainID, sequence uint64, payload []byte, syncType SyncType, options ...tx.Option) (*core_types.ResultBroadcastTx, error)
 	GetProphecy(chainId sdk.IbcChainID, sequence int64) (*msg.Prophecy, error)
 	GetCurrentOracleSequence(chainId sdk.IbcChainID) (int64, error)
-	
+
 	SideChainVote(proposalID int64, option msg.VoteOption, sideChainId string, syncType SyncType, options ...tx.Option) (*core_types.ResultBroadcastTx, error)
 	SideChainDeposit(proposalID int64, amount types.Coins, sideChainId string, syncType SyncType, options ...tx.Option) (*core_types.ResultBroadcastTx, error)
 	SideChainSubmitSCParamsProposal(title string, scParam msg.SCChangeParams, initialDeposit types.Coins, votingPeriod time.Duration, sideChainId string, syncType SyncType, options ...tx.Option) (*core_types.ResultBroadcastTx, error)
@@ -1045,4 +1045,144 @@ func (c *HTTP) sign(m msg.Msg, options ...tx.Option) ([]byte, error) {
 		}
 	}
 	return c.key.Sign(*signMsg)
+}
+
+// func (c *HTTP) sign(m msg.Msg, options ...tx.Option) ([]byte, error) {
+// 	if c.key == nil {
+// 		return nil, fmt.Errorf("keymanager is missing, use SetKeyManager to set key")
+// 	}
+// 	// prepare message to sign
+// 	chainID := gtypes.ProdChainID
+// 	if types.Network == types.TestNetwork {
+// 		chainID = gtypes.TestnetChainID
+// 	} else if types.Network == types.TmpTestNetwork {
+// 		chainID = gtypes.KongoChainId
+// 	} else if types.Network == types.GangesNetwork {
+// 		chainID = gtypes.GangesChainId
+// 	}
+// 	signMsg := &tx.StdSignMsg{
+// 		ChainID:       chainID,
+// 		AccountNumber: -1,
+// 		Sequence:      -1,
+// 		Memo:          "",
+// 		Msgs:          []msg.Msg{m},
+// 		Source:        tx.Source,
+// 	}
+//
+// 	for _, op := range options {
+// 		signMsg = op(signMsg)
+// 	}
+//
+// 	if signMsg.Sequence == -1 || signMsg.AccountNumber == -1 {
+// 		fromAddr := c.key.GetAddr()
+// 		acc, err := c.GetAccount(fromAddr)
+// 		if err != nil {
+// 			return nil, err
+// 		}
+// 		if acc == nil {
+// 			return nil, fmt.Errorf("the signer account do not exist in the chain")
+// 		}
+// 		signMsg.Sequence = acc.GetSequence()
+// 		signMsg.AccountNumber = acc.GetAccountNumber()
+// 	}
+//
+// 	// special logic for createOrder, to save account query
+// 	if orderMsg, ok := m.(msg.CreateOrderMsg); ok {
+// 		orderMsg.ID = msg.GenerateOrderID(signMsg.Sequence+1, c.key.GetAddr())
+// 		signMsg.Msgs[0] = orderMsg
+// 	}
+//
+// 	for _, m := range signMsg.Msgs {
+// 		if err := m.ValidateBasic(); err != nil {
+// 			return nil, err
+// 		}
+// 	}
+// 	return c.key.Sign(*signMsg)
+// }
+
+func (c *HTTP) signByMultipyMsg(ms []msg.Msg, options ...tx.Option) ([]byte, error) {
+	if c.key == nil {
+		return nil, fmt.Errorf("keymanager is missing, use SetKeyManager to set key")
+	}
+	// prepare message to sign
+	chainID := gtypes.ProdChainID
+	if types.Network == types.TestNetwork {
+		chainID = gtypes.TestnetChainID
+	} else if types.Network == types.TmpTestNetwork {
+		chainID = gtypes.KongoChainId
+	} else if types.Network == types.GangesNetwork {
+		chainID = gtypes.GangesChainId
+	}
+	signMsg := &tx.StdSignMsg{
+		ChainID:       chainID,
+		AccountNumber: -1,
+		Sequence:      -1,
+		Memo:          "",
+		Msgs:          ms,
+		Source:        tx.Source,
+	}
+
+	for _, op := range options {
+		signMsg = op(signMsg)
+	}
+
+	if signMsg.Sequence == -1 || signMsg.AccountNumber == -1 {
+		fromAddr := c.key.GetAddr()
+		acc, err := c.GetAccount(fromAddr)
+		if err != nil {
+			return nil, err
+		}
+		if acc == nil {
+			return nil, fmt.Errorf("the signer account do not exist in the chain")
+		}
+		signMsg.Sequence = acc.GetSequence()
+		signMsg.AccountNumber = acc.GetAccountNumber()
+	}
+
+	// special logic for createOrder, to save account query
+	// if orderMsg, ok := m.(msg.CreateOrderMsg); ok {
+	// 	orderMsg.ID = msg.GenerateOrderID(signMsg.Sequence+1, c.key.GetAddr())
+	// 	signMsg.Msgs[0] = orderMsg
+	// }
+
+	for _, m := range signMsg.Msgs {
+		if err := m.ValidateBasic(); err != nil {
+			return nil, err
+		}
+	}
+	return c.key.Sign(*signMsg)
+}
+
+func (c *HTTP) BroadcastByMultipyMsg(ms []msg.Msg, syncType SyncType, options ...tx.Option) (*core_types.ResultBroadcastTx, error) {
+	signBz, err := c.signByMultipyMsg(ms, options...)
+	if err != nil {
+		return nil, err
+	}
+	switch syncType {
+	case Async:
+		return c.BroadcastTxAsync(signBz)
+	case Sync:
+		return c.BroadcastTxSync(signBz)
+	case Commit:
+		commitRes, err := c.BroadcastTxCommit(signBz)
+		if err != nil {
+			return nil, err
+		}
+		if commitRes.CheckTx.IsErr() {
+			return &core_types.ResultBroadcastTx{
+				Code: commitRes.CheckTx.Code,
+				Log:  commitRes.CheckTx.Log,
+				Hash: commitRes.Hash,
+				Data: commitRes.CheckTx.Data,
+			}, nil
+		}
+		return &core_types.ResultBroadcastTx{
+			Code: commitRes.DeliverTx.Code,
+			Log:  commitRes.DeliverTx.Log,
+			Hash: commitRes.Hash,
+			Data: commitRes.DeliverTx.Data,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown synctype")
+	}
 }
